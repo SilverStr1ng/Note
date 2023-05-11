@@ -8989,3 +8989,166 @@ const emit = defineEmits(['change', 'delete'])
 
 >`<transition-group>` 也可以指定name属性来替换默认的类型，和`<transision>`不同的是，`<transition-group>`最终会被渲染成一个真实存在的标签，你可以通过tag属性来指定，上面的示例中`<transition-group>`最终会被渲染成一个ul。
 
+### VUE响应原理
+
+#### VUE2响应原理
+
+>在Vue2中，我们会把数据放到配置选项data中，一旦我们这样做了，我们心里清楚此时一旦视图中的操作修改了data中的数据，视图会立刻(这个立刻仍然需要等待一个异步更新队列 在nextTick中讨论过这个问题)自动更新。
+>
+>似乎data的每个数据都被“劫持”了，一旦它被修改为了一个新值，Vue就能监测到这个变化通知视图更新。
+>
+>在ES5的规范中，提供了一个API叫做`Object.defineProperty()`，它可以为对象属性添加getter/setter，从而对对象的存值和取值行为进行拦截，而这个API即是Vue2响应式原理的实现核心，由于这个API是ES5中一个无法被Babel模拟的属性，所以Vue无法支持像IE8等低版本浏览器。
+
+#### Vue2 检测变化的注意事项
+
+##### 检测对象
+
+>Vue2是无法检测到数据的添加或者删除的，所以我们在初始化数据的时候推荐把可能用到的响应式数据都设置到data中。
+>
+>对于已经创建的实例，Vue 不允许动态添加或删除根级别的响应式数据。如果你希望响应式地添加或者删除，可以调用`Vue.set`或者`Vue.delete`来嵌套添加。
+
+```vue
+var vm = new Vue({
+  data:{
+    a:1
+  }
+})
+Vue.set(vm,'b',2) //这么做是错误地  因为'b' 被视作了根级别地数据
+```
+
+
+
+```vue
+var vm = new Vue({
+  data:{
+    msg:{
+      a:1
+    }
+  }
+})
+vm.msg.b=2 //不具有响应性
+Vue.set(vm.msg,'b',2) //这样做是符合Vue规范地
+```
+
+##### 检测数组
+
+>Vue2中是无法检测数组的以下变化的：
+>
+>- 利用索引直接设置一个数组项
+>- 修改数组的长度
+
+```vue
+var vm = new Vue({
+        el: '#app',
+        data() {
+          return {
+            list: [1, 2, 3, 4, 5],
+          }
+        },
+      })
+ vm.list[0] = 10 //直接通过索引值修改某一项无法实现响应性
+ vm.list.splice(0, 1, 10) //利用数组方法可以实现响应性
+ vm.list.length = 2
+```
+
+##### 手写响应式原理
+
+```vue
+import newArrayPrototype from './3.array.js' //引入重写数组的方法
+//定义一个起始数据data data有可能是一个函数 也可能是一个对象 所以需要做一个判断  
+data = typeof data === 'function' ? data() : data
+//然后定义一个方法 用于观测数据 
+observe(data)
+function observe(data){
+    // 数据是基本数据类型 直接终止
+    if (typeof data !== 'object' || typeof data === null) return
+    //如果数据是引用值类型 我们就需要分为对象和数组2大类 来单独处理
+    if (Array.isArray(data)) {
+      observeArray(data) //进一步观测数组中的每一项
+      //这里重写部分数组方法 实现数组操作的响应性 这里的思路是在数组的原型链上多加一层 因为除开重写的方法 还有其他数组方法不能被丢失 
+     data.observeArray=observeArray //给自身挂载一个观测数组的方法 在下面会用到
+     data.__proto__= newArrayPrototype  //这个newArrayPrototype 可以放到单独文件中编写实现 然后引入 
+    } else {
+      walk(data) //对象的处理方法
+    }
+}
+//先处理对象 实现walk方法
+function walk(data){
+    //对象数据 需要对data中的每一个数据都实现响应式  所以需要遍历
+     Object.keys(data).forEach((key) => {
+      defineReactive(data, key, data[key]) //这里的defineReactive即是实现响应式原理的核心方法
+    })
+}
+function defineReactive(data, key, value) {
+  observe(value) //对象内部可能存在多层嵌套 所以要递归观测
+  Object.defineProperty(data, key,{ //这里就调用核心API来实现数据劫持
+    get() {
+      return value
+    },
+    set(newValue) {
+      if (newValue === value) return
+      observe(newValue) //修改后的数据也要观测 变成响应式的
+      value = newValue
+      console.log('视图更新成功') //这里不关注是如何通知视图的 用一句输出语句代替
+    },
+  })
+}
+//再来处理数组
+function observeArray(data){ //数组中的具体每一项仍旧需要观测 
+    data.forEach((item) => {
+      observe(item)
+    })
+}
+```
+
+
+
+```vue
+const oldArrayPrototype = Array.prototype //数组本身的方法需要拷贝一份 因为有些方法没有重写 需要保留下来
+const newArrayPrototype = Object.create(oldArrayPrototype) //在data和Array中间加了一层原型链
+let arrayLists = [ //这是7个改变数组的方法 需要重写 其他数组方法不用重写
+  'push',
+  'pop',
+  'shift',
+  'unshift',
+  'reverse',
+  'sort',
+  'splice',
+]
+arrayLists.forEach((item) => {
+  newArrayPrototype[item] = function (...arg) {
+    const result = oldArrayPrototype[item].call(this, ...arg) //实现数组方法本身的功能
+    let inserted  //有3个方法 push unshift splice 会加入新数组 这些数组也需要被观测
+    switch (item) {
+        case 'push':
+        case 'unshift':
+            inserted = arg
+            break
+        case 'splice':
+            inserted = arg.slice(2)
+        default:
+            break
+    }
+    if(inserted){
+        this.observeArray(inserted) //这里的this 指向data 
+    }
+    console.log('视图更新成功') //通知视图更新
+    return result
+  }
+})
+export default newArrayPrototype
+```
+
+
+
+>我们再来梳理一遍 vue2 响应式原理的实现: 首先实现了 `defineReactive` 方法, 通过`Object.defineProperty` 为劫持数据, 然后定义了 `walk` 方法, 通过 `Object.keys` 方法和 `defineReactive` 方法劫持对象中的所有数据
+>
+>然后,我们定义了一个 `observe` 方法用于观测数据: 首先要判断传进来的数据是不是引用类型(object或者 array), 如果不是, 则直接中断函数的执行; 如果是,  再判断传进来的数据是不是数组(Array), 如果是数组, 我们需要完成对数组的处理, 如果是对象(object), 则执行walk方法
+>
+>下面来说明观测数组的方法, 首先我们定义了一个 `observeArray` 方法, 然后将这个方法挂载到传入的数据 `data` 上, 并将 `data` 的 `__proto__` 属性指向一个新的对象 `newArrayPrototype`, `observeArray` 方法通过遍历数组中的每一项, 并对每一项执行 `observe` 方法实现对数组的观测, 但这是不够的, 在vue2中, 数组方法不单要实现对数组数据的观测, 还要实现原本的数据方法, 这里我们用原型链来实现: **也就是在 `data` 和其原本的原型中增加一个对象, 在这个对象中实现改变数组的方法**
+>
+>首先定义一个 `oldArrayPortotype` 对象来接收数组本身的方法, 然后通过 `Object.create()` 方法定义一个新的原型对象 `newArrayPrototype`, 这个对象的 `__proto__` 指向 `oldArrayPrototype`, 然后在 `newArrayPrototype` 中重写改变数组的七个方法 `[push, pop, unshift, shift, sort, splice, reverse]`
+>
+>首先遍历数组, 用 `oldArrayPrototype` 中的相应方法实现数组方法原本的功能, 注意要用 `call` 方法实现, 以改变 `this` 的指向, 然后将新加入数组的元素进行观测, 这里分两种情况, `push` 方法和 `unshift` 方法的所有参数都需要观测, `splice` 方法从第三个参数开始进行观测, 这里用一个 `switc...case..` 方法实现, 将这些参数用 `rest` 或者 `slice` 方法收集, 然后对它们执行 `observeArray` 方法
+>
+>`defineReactive` 的具体实现思路为设置传入数据的 `get` 和 `set`, 如果 `set` 传入的新值和现有的值不相等, 就将新值加入观测(`observe`方法), 并将新值赋给现有的值
